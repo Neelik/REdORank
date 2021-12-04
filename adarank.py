@@ -11,6 +11,7 @@ import sys
 from sklearn.utils import check_X_y
 
 from metrics import NDCGScorer
+from csdcg import NCSDCGScorer_qid
 
 
 class AdaRank(sklearn.base.BaseEstimator):
@@ -22,17 +23,18 @@ class AdaRank(sklearn.base.BaseEstimator):
         self.estop = estop
         self.verbose = verbose
         self.scorer = scorer
+        self.coef_ = None
 
     def fit(self, X, y, qid, X_valid=None, y_valid=None, qid_valid=None):
         """Fit a model to the data"""
         X, y = check_X_y(X, y, 'csr')
-        X = X.toarray()
+        # X = X.toarray()
 
         if X_valid is None:
             X_valid, y_valid, qid_valid = X, y, qid
         else:
             X_valid, y_valid = check_X_y(X_valid, y_valid, 'csr')
-            X_valid = X_valid.toarray()
+            # X_valid = X_valid.toarray()
 
         n_queries = np.unique(qid).shape[0]
         weights = np.ones(n_queries, dtype=np.float64) / n_queries
@@ -47,7 +49,10 @@ class AdaRank(sklearn.base.BaseEstimator):
         weak_ranker_score = []
         for j in range(X.shape[1]):
             pred = X[:, j].ravel()
-            weak_ranker_score.append(self.scorer(y, pred, qid))
+            if isinstance(self.scorer, NCSDCGScorer_qid):
+                weak_ranker_score.append(self.scorer(y, pred, qid, X))
+            else:
+                weak_ranker_score.append(self.scorer(y, pred, qid))
 
         best_perf_train = -np.inf
         best_perf_valid = -np.inf
@@ -64,12 +69,14 @@ class AdaRank(sklearn.base.BaseEstimator):
                 if fid in used_fids:
                     continue
                 weighted_average = np.dot(weights, score)
+                # print("weighted average", weighted_average)
                 if weighted_average > best_weighted_average:
                     best_weak_ranker = {'fid': fid, 'score': score}
                     best_weighted_average = weighted_average
 
             # stop when all the weaker rankers are out
             if best_weak_ranker is None:
+                print("there are no weak rnakers")
                 break
 
             h = best_weak_ranker
@@ -85,12 +92,18 @@ class AdaRank(sklearn.base.BaseEstimator):
             # used_fids.append(h['fid'])
 
             # score both training and validation data
-            score_train = self.scorer(y, np.dot(X, coef), qid)
+            if isinstance(self.scorer, NDCGScorer):
+                scorer_args = (y, np.dot(X, coef), qid)
+                vali_scorer_args = (y_valid, np.dot(X_valid, coef), qid_valid)
+            if isinstance(self.scorer, NCSDCGScorer_qid):
+                scorer_args = (y, np.dot(X, coef), qid, X)
+                vali_scorer_args = (y_valid, np.dot(X_valid, coef), qid_valid, X_valid)
+            score_train = self.scorer(*scorer_args)
             perf_train = score_train.mean()
 
             perf_valid = perf_train
             if X_valid is not X:
-                perf_valid = self.scorer(y_valid, np.dot(X_valid, coef), qid_valid).mean()
+                perf_valid = self.scorer(*vali_scorer_args).mean()
 
             if self.verbose:
                 print('{n_iter}\t{alpha}\t{fid}\t{score}\ttrain {train:.4f}\tvalid {valid:.4f}'.
@@ -122,4 +135,5 @@ class AdaRank(sklearn.base.BaseEstimator):
 
     def predict(self, X, qid):
         """Make predictions"""
-        return np.dot(X.toarray(), self.coef_)
+        return np.dot(X, self.coef_)
+        # return np.dot(X.toarray(), self.coef_)
